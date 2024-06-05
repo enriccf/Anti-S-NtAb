@@ -55,6 +55,19 @@ p <- ggplot(data = data_long, aes(x = case, y = Value, group = case, color = Typ
 # Show the plot
 print(p)
 
+#Fit a linear regression model to the random forest predictions
+ linear_model <- lm(Predicted_BA ~ RBD, data = training_data)
+
+#View the summary of the linear model
+ summary(linear_model)
+
+
+ 
+#Extract the equation from the linear model
+linear_model_equation <- paste("Predicted_BA =",+ round(coef(linear_model)[1], 4), "+", + round(coef(linear_model)[2], 4), "* RBD")
+
+print(linear_model_equation)
+
 # Step 1: Calculate the absolute difference between predicted and real values
 prediction_data$Abs_Difference <- abs(prediction_data$Target - prediction_data$Predictions_Target)
 
