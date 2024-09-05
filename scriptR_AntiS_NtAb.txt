@@ -1,101 +1,127 @@
 ###### Random Forest + error parameters ######
 
-# Install and load necessary libraries
-if (!requireNamespace("randomForest", quietly = TRUE))
-    install.packages("randomForest")
-if (!requireNamespace("ggplot2", quietly = TRUE))
-    install.packages("ggplot2")
-if (!requireNamespace("readxl", quietly = TRUE))
-    install.packages("readxl")
-
+# Load necessary libraries
 library(randomForest)
 library(ggplot2)
 library(readxl)
+library(caret)
+library(gridExtra)
 
-# Load training data from Excel
-training_data <- read_excel("training_data.xlsx")
+# Define a function to run the Random Forest analysis with linear regression
+run_rf_analysis <- function(excel_file, predictor_col, target_col, y_axis_max) {
+  
+  # Load data from Excel
+  data <- read_excel(excel_file)
+  
+  # Ensure the predictor and target columns are numeric
+  data[[predictor_col]] <- as.numeric(as.character(data[[predictor_col]]))
+  data[[target_col]] <- as.numeric(as.character(data[[target_col]]))
+  
+  # Remove rows with NA values
+  data <- data[complete.cases(data[, c(predictor_col, target_col)]), ]
+  
+  # Initialize vectors to store metrics
+  all_rmse <- numeric(5)
+  all_mean_error <- numeric(5)
+  all_predictions <- list()  # To store predictions from each model
+  
+  set.seed(123)  # For reproducibility
+  
+  # Initialize a list to store plots
+  plot_list <- list()
+  
+  # Iterate 5 times
+  for (i in 1:5) {
+    # Split data into 90% training and 10% testing
+    trainIndex <- createDataPartition(data[[target_col]], p = 0.9, list = FALSE)
+    training_data <- data[trainIndex, ]
+    test_data <- data[-trainIndex, ]
+    
+    # Train the Random Forest model
+    formula <- as.formula(paste(target_col, "~", predictor_col))
+    model_rf <- randomForest(formula, data = training_data, ntree = 2000, mtry = 1, nodesize = 5, maxnodes = 10, importance = TRUE)
+    
+    # Make predictions
+    test_data$Predictions <- predict(model_rf, newdata = test_data)
+    
+    # Store the predictions for later averaging
+    all_predictions[[i]] <- test_data$Predictions
+    
+    # Calculate RMSE and MAE based on the predictions
+    test_data$Abs_Difference <- abs(test_data[[target_col]] - test_data$Predictions)
+    RMSE <- sqrt(mean(test_data$Abs_Difference^2))
+    MAE <- mean(test_data$Abs_Difference)
+    
+    # Store metrics for this iteration
+    all_rmse[i] <- RMSE
+    all_mean_error[i] <- MAE
+    
+    # Prepare data for plotting
+    test_data$case <- seq_along(test_data[[target_col]])
+    data_long <- tidyr::pivot_longer(test_data, cols = c(target_col, "Predictions"), names_to = "Type", values_to = "Value")
+    data_long$Type <- factor(data_long$Type, levels = c(target_col, "Predictions"), labels = c("Real", "Predicted"))
+    
+    # Create comparative plot for this model
+    plot <- ggplot(data = data_long, aes(x = case, y = Value, shape = Type, fill = Type)) +
+      geom_point(size = 3) +
+      geom_line(aes(group = case), linetype = "dashed", color = "grey") +
+      scale_shape_manual(values = c("Real" = 15, "Predicted" = 24)) +
+      scale_fill_manual(values = c("Real" = "black", "Predicted" = "white")) +
+      theme_minimal() +
+      labs(title = paste("RF Model", i, "- MAE:", round(MAE, 3)), x = "Case", y = "Value", shape = "Value", fill = "Value") +
+      scale_x_continuous(breaks = scales::pretty_breaks(n = 5)) +  # Non-decimal numbers on X-axis
+      ylim(0, y_axis_max)  # Set Y-axis limits dynamically
+    
+    plot_list[[i]] <- plot
+  }
+  
+  # Calculate average metrics
+  avg_rmse <- mean(all_rmse)
+  avg_mean_error <- mean(all_mean_error)
+  
+  # Combine predictions from all 5 models to create averaged predictions
+  avg_predictions <- rowMeans(do.call(cbind, all_predictions))
+  
+  # Fit a linear model to the averaged predictions
+  lm_model <- lm(avg_predictions ~ test_data[[predictor_col]])
+  
+  # Get the linear equation and R-squared for the linear fit
+  lm_equation <- paste("Predicted_", target_col, " =", round(coef(lm_model)[1], 4), "+", round(coef(lm_model)[2], 4), "*", predictor_col)
+  r_squared <- summary(lm_model)$r.squared
+  
+  # Add the linear regression plot with the equation and R-squared in black and white
+  plot_linear <- ggplot(data.frame(test_data[[predictor_col]], avg_predictions), aes(x = test_data[[predictor_col]], y = avg_predictions)) +
+    geom_point(color = "black", shape = 15) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+    labs(title = paste("Linear Fit - R²:", round(r_squared, 3)), x = predictor_col, y = paste("Predicted", target_col)) +
+    annotate("text", x = Inf, y = Inf, label = lm_equation, hjust = 1.1, vjust = 2, color = "black") +
+    theme_minimal() +
+    ylim(0, y_axis_max)  # Set Y-axis limits
+  
+  plot_list[[6]] <- plot_linear  # Add this plot as the last plot
+  
+  # Create summary table
+  summary_df <- data.frame(Metric = c("Average RMSE", "Average MAE", "Best RMSE", "Best MAE"), 
+                           Value = c(round(avg_rmse, 3), round(avg_mean_error, 3), round(min(all_rmse), 3), round(min(all_mean_error), 3)))
+  summary_plot <- tableGrob(summary_df, rows = NULL)
+  plot_list[[7]] <- summary_plot  # Add the summary table as the last element
+  
+  # Combine all plots into one
+  combined_plot <- marrangeGrob(plot_list, nrow = 3, ncol = 2)
+  print(combined_plot)
+  
+  # Print results
+  cat("Average Root Mean Squared Error (RMSE):", avg_rmse, "\n")
+  cat("Average Mean Error (MAE):", avg_mean_error, "\n")
+  cat("Best Root Mean Squared Error (RMSE):", min(all_rmse), "\n")
+  cat("Best Mean Error (MAE):", min(all_mean_error), "\n")
+  cat("R-squared of the linear fit:", r_squared, "\n")
+  cat("Equation of the linear fit:", lm_equation, "\n")
+}
 
-# Ensure columns are in numeric format
-training_data$Predictor <- as.numeric(as.character(training_data$Predictor))
-training_data$Target <- as.numeric(as.character(training_data$Target))
+# Example usage
+# run_rf_analysis("your_excel_file.xlsx", "predictor_column_name", "target_column_name", y_axis_max_value)
 
-# Train the random forest model with the training data
-model_rf <- randomForest(Target ~ Predictor, data = training_data, ntree = 1000, importance = TRUE)
-
-# View the model summary
-print(model_rf)
-
-# Load prediction data from the same Excel
-prediction_data <- read_excel("prediction_data.xlsx")
-
-# Ensure columns are in numeric format
-prediction_data$Predictor <- as.numeric(as.character(prediction_data$Predictor))
-prediction_data$Target <- as.numeric(as.character(prediction_data$Target))
-
-# Predict using the trained model on the new data set
-prediction_data$Predictions_Target <- predict(model_rf, newdata = prediction_data)
-
-# Prepare data for plotting by creating an index for each observation
-prediction_data$case <- seq_along(prediction_data$Target)
-
-# Convert data to long format for easier plotting
-data_long <- tidyr::pivot_longer(prediction_data, cols = c(Target, Predictions_Target), names_to = "Type", values_to = "Value")
-
-# Create the comparative plot
-p <- ggplot(data = data_long, aes(x = case, y = Value, group = case, color = Type)) +
-  geom_point(position = position_dodge(width = 0.2)) +
-  geom_line(aes(group = case), position = position_dodge(width = 0.2)) +
-  scale_color_manual(values = c(Target = "blue", Predictions_Target = "red")) +
-  theme_minimal() +
-  labs(title = "Comparison of actual vs predicted values",
-       x = "Case",
-       y = "Value",
-       color = "Value Type")
-
-# Show the plot
-print(p)
-
-#Fit a linear regression model to the random forest predictions
- linear_model <- lm(Predicted_BA ~ RBD, data = training_data)
-
-#View the summary of the linear model
- summary(linear_model)
-
-
- 
-#Extract the equation from the linear model
-linear_model_equation <- paste("Predicted_BA =",+ round(coef(linear_model)[1], 4), "+", + round(coef(linear_model)[2], 4), "* RBD")
-
-print(linear_model_equation)
-
-# Step 1: Calculate the absolute difference between predicted and real values
-prediction_data$Abs_Difference <- abs(prediction_data$Target - prediction_data$Predictions_Target)
-
-# Step 2: Square each absolute difference to get squared errors
-prediction_data$Squared_Error <- prediction_data$Abs_Difference^2
-
-# Step 3: Compute the Mean Squared Error (MSE)
-MSE <- mean(prediction_data$Squared_Error)
-
-# Step 4: Compute the Root Mean Squared Error (RMSE)
-RMSE <- sqrt(MSE)
-
-# Step 5: Optionally, perform statistical tests to calculate p-value
-# You can use t-tests, ANOVA, or other appropriate statistical tests depending on your data and requirements.
-# Assuming a t-test for simplicity
-t_test <- t.test(prediction_data$Target, prediction_data$Predictions_Target)
-
-# Extract p-value
-p_value <- t_test$p.value
-
-# Step 6: Compute the Mean Error
-Mean_Error <- mean(prediction_data$Abs_Difference)
-
-# Print the results
-cat("Mean Squared Error (MSE):", MSE, "\n")
-cat("Root Mean Squared Error (RMSE):", RMSE, "\n")
-cat("Mean Error:", Mean_Error, "\n")
-cat("P-value:", p_value, "\n")
 
 ###### NtAb Threshold establishing ######
 
@@ -103,42 +129,65 @@ cat("P-value:", p_value, "\n")
 library(ggplot2)
 library(readxl)
 
-# Load data if not already loaded
-training_data <- read_excel("your_data.xlsx")
+# Define a function for logistic regression analysis and threshold determination
+logistic_regression_threshold <- function(file_path, predictor_col, target_col, threshold_value, decision_prob = 0.75) {
 
-# Ensure that 'training_data' contains 'Predictor' and 'Target' columns
-# Convert to numeric if necessary
-training_data$Predictor <- as.numeric(as.character(training_data$Predictor))
-training_data$Target <- as.numeric(as.character(training_data$Target))
+  # Verify if the file exists
+  if (!file.exists(file_path)) {
+    stop(paste("The file does not exist:", file_path))
+  }
 
-# Create a binary outcome for Target > threshold_value
-threshold_value <- 0.0018
-training_data$Target_High <- ifelse(training_data$Target > threshold_value, 1, 0)
+  # Load data from the specified Excel file
+  training_data <- read_excel(file_path)
 
-# Fit logistic regression model
-model <- glm(Target_High ~ Predictor, data = training_data, family = binomial())
+  # Ensure the predictor and target columns are numeric
+  training_data[[predictor_col]] <- as.numeric(as.character(training_data[[predictor_col]]))
+  training_data[[target_col]] <- as.numeric(as.character(training_data[[target_col]]))
 
-# Determine the Predictor value for the 50% probability threshold
-threshold_predictor <- -coef(model)["(Intercept)"] / coef(model)["Predictor"]
+  # Remove rows with NA values in the predictor and target columns
+  training_data <- training_data[complete.cases(training_data[, c(predictor_col, target_col)]), ]
 
-# Output the model summary and threshold value
-print(summary(model))
-print(paste("Threshold Predictor value:", threshold_predictor))
+  # Initial scatter plot to visualize the data
+  ggplot(training_data, aes(x = training_data[[predictor_col]], y = training_data[[target_col]])) +
+    geom_point(alpha = 0.6) +
+    labs(title = paste(predictor_col, "vs.", target_col), x = predictor_col, y = target_col) +
+    theme_minimal()
 
-# Create a new factor variable in your data frame for coloring based on Target values
-training_data$Target_Category <- factor(training_data$Target > threshold_value, 
-                                       levels = c(FALSE, TRUE), 
-                                       labels = c(paste("Below", threshold_value), paste("Above", threshold_value)))
+  # Create a binary outcome for the target column > threshold_value
+  training_data$Target_High <- ifelse(training_data[[target_col]] > threshold_value, 1, 0)
 
-# Create the plot
-ggplot(training_data, aes(x = Predictor, y = Target)) +
-  geom_point(aes(color = Target_Category), alpha = 0.6) +  # Use the new factor variable for color
-  geom_hline(yintercept = threshold_value, linetype = "dashed", color = "red") +
-  geom_vline(xintercept = threshold_predictor, linetype = "dashed", color = "green", size = 1) +
-  labs(title = "Predictor vs. Target with Decision Boundary", x = "Predictor", y = "Target") +
-  scale_color_manual(values = c(paste("Below", threshold_value) = "blue", paste("Above", threshold_value) = "red")) +  # Ensure the labels match the factor levels
-  theme_minimal() +
-  annotate("text", x = threshold_predictor, y = Inf, label = sprintf("Threshold Predictor = %.2f", threshold_predictor), vjust = -1, hjust = 1.5)
+  # Fit the logistic regression model
+  formula <- as.formula(paste("Target_High ~", predictor_col))
+  model <- glm(formula, data = training_data, family = binomial())
 
+  # Print model summary
+  summary(model)
+
+  # Determine the predictor value for the specified decision threshold (e.g., 75% probability)
+  log_odds <- log(decision_prob / (1 - decision_prob))
+  threshold_predictor <- (log_odds - coef(model)["(Intercept)"]) / coef(model)[[predictor_col]]
+
+  # Print the predictor threshold value
+  print(paste("Threshold value for", decision_prob * 100, "% probability:", threshold_predictor))
+
+  # Create a new factor variable in the dataset for coloring based on the target values
+  training_data$Target_Category <- factor(training_data[[target_col]] > threshold_value, 
+                                          levels = c(FALSE, TRUE), 
+                                          labels = c(paste("Below", threshold_value), paste("Above", threshold_value)))
+
+  # Plot with decision boundary
+  ggplot(training_data, aes(x = training_data[[predictor_col]], y = training_data[[target_col]])) +
+    geom_point(aes(shape = Target_Category, fill = Target_Category), alpha = 0.6, size = 3) +  # Shape and fill based on the new factor variable
+    geom_hline(yintercept = threshold_value, linetype = "dashed", color = "black") +
+    geom_vline(xintercept = threshold_predictor, linetype = "dashed", color = "black", size = 1) +
+    labs(title = paste(predictor_col, "vs.", target_col, "with Decision Boundary"), x = predictor_col, y = target_col) +
+    scale_shape_manual(values = c(paste("Below", threshold_value) = 15, paste("Above", threshold_value) = 24)) +  # Set shape symbols
+    scale_fill_manual(values = c(paste("Below", threshold_value) = "black", paste("Above", threshold_value) = "white")) +  # Set fill colors
+    theme_minimal() +
+    annotate("text", x = threshold_predictor, y = Inf, label = sprintf("Threshold %s for %.0f%% = %.2f", predictor_col, decision_prob * 100, threshold_predictor), vjust = -1, hjust = 1.5)
+}
+
+# Example usage
+# logistic_regression_threshold("your_excel_file.xlsx", "predictor_column_name", "target_column_name", threshold_value, decision_prob = 0.75)
 
 
